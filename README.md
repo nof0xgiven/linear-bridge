@@ -1,3 +1,5 @@
+<img src="image.png" />
+
 # linear-bridge
 
 Linear webhook service (CLI: `linear-bridge`) that runs RepoPrompt (`rp-cli`) and Sandbox Agent workflows from Linear issue labels and comment mentions (configuration-driven).
