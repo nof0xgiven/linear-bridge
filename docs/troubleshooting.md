@@ -18,6 +18,13 @@
 - If `worktree.postCreateScript` is set, confirm the script exists and is executable.
 - A non-zero exit from the post-create script aborts the run and cleans up the worktree.
 
+## Review / GitHub Says "No Worktree Found"
+
+The `review` and `github` workflows require an existing worktree (typically created by the `code` workflow).
+
+- Apply `code` first to create the worktree and run the agent.
+- Then apply `review` (or `github`) to run the follow-up workflow.
+
 ## Sandbox Agent Errors
 
 - Ensure `sandbox-agent` is installed and reachable.

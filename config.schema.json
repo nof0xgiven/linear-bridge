@@ -116,6 +116,16 @@
                   "automation": {
                     "type": "object",
                     "properties": {
+                      "labels": {
+                        "type": "object",
+                        "properties": {
+                          "removeTriggerLabelOnFailure": {
+                            "type": "boolean",
+                            "default": false
+                          }
+                        },
+                        "additionalProperties": false
+                      },
                       "coding": {
                         "type": "object",
                         "properties": {

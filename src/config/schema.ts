@@ -20,6 +20,11 @@ export const WorkspaceSchema = z.object({
   projectIds: z.array(z.string().min(1)).optional().default([]),
   localPath: z.string().min(1),
   automation: z.object({
+    labels: z.object({
+      // If true, remove the triggering label when a label-triggered workflow fails.
+      // This makes reruns easier (you can re-add the label to trigger again).
+      removeTriggerLabelOnFailure: z.boolean().default(false),
+    }).optional(),
     coding: z.object({
       // Workflow state name or ID (UUID). Resolved at runtime per team.
       setInProgressState: z.string().min(1).optional(),

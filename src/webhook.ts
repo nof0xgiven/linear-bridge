@@ -22,6 +22,7 @@ import { matchTriggers } from './triggers/matcher'
 import { resolveWorkspaceForIssue, getSandboxOverride } from './workspace'
 import { agentRunDurationSeconds, agentRunsTotal, triggerMatchesTotal, webhookEventsTotal } from './metrics'
 import { writeDeadLetter } from './dead-letter'
+import { formatFailureAck, type WorkflowFailure, type WorkflowBotName } from './workflow-errors'
 
 /**
  * Simple in-memory deduplication cache for webhook events.
@@ -208,35 +209,35 @@ export function createWebhookHandler(config: AppConfig) {
         }
 
         if (triggerMatch.action === 'context') {
-          processContextOnly(config, issue.id, ackCommentId).catch((error) => {
+          processContextOnly(config, issue.id, ackCommentId, triggerMatch.trigger).catch((error) => {
             logger.error({ error }, '[webhook] Background processing failed')
           })
           return
         }
 
         if (triggerMatch.action === 'guide') {
-          processGuideRequest(config, issue.id, ackCommentId).catch((error) => {
+          processGuideRequest(config, issue.id, ackCommentId, triggerMatch.trigger).catch((error) => {
             logger.error({ error }, '[webhook] Background processing failed')
           })
           return
         }
 
         if (triggerMatch.action === 'plan') {
-          processPlanRequest(config, issue.id, ackCommentId).catch((error) => {
+          processPlanRequest(config, issue.id, ackCommentId, triggerMatch.trigger).catch((error) => {
             logger.error({ error }, '[webhook] Background processing failed')
           })
           return
         }
 
         if (triggerMatch.action === 'review') {
-          processReviewRequest(config, issue.id, ackCommentId).catch((error) => {
+          processReviewRequest(config, issue.id, ackCommentId, triggerMatch.trigger).catch((error) => {
             logger.error({ error }, '[webhook] Background processing failed')
           })
           return
         }
 
         if (triggerMatch.action === 'github') {
-          processGithubRequest(config, issue.id, ackCommentId).catch((error) => {
+          processGithubRequest(config, issue.id, ackCommentId, triggerMatch.trigger).catch((error) => {
             logger.error({ error }, '[webhook] Background processing failed')
           })
           return
@@ -308,21 +309,21 @@ export function createWebhookHandler(config: AppConfig) {
         }
 
         if (triggerMatch.action === 'context') {
-          processContextOnly(config, comment.issueId, ackCommentId).catch((error) => {
+          processContextOnly(config, comment.issueId, ackCommentId, triggerMatch.trigger).catch((error) => {
             logger.error({ error }, '[webhook] Background processing failed')
           })
           return
         }
 
         if (triggerMatch.action === 'guide') {
-          processGuideRequest(config, comment.issueId, ackCommentId).catch((error) => {
+          processGuideRequest(config, comment.issueId, ackCommentId, triggerMatch.trigger).catch((error) => {
             logger.error({ error }, '[webhook] Background processing failed')
           })
           return
         }
 
         if (triggerMatch.action === 'plan') {
-          processPlanRequest(config, comment.issueId, ackCommentId).catch((error) => {
+          processPlanRequest(config, comment.issueId, ackCommentId, triggerMatch.trigger).catch((error) => {
             logger.error({ error }, '[webhook] Background processing failed')
           })
           return
@@ -364,6 +365,73 @@ function buildSandboxRunConfig(config: AppConfig, workspaceName: string, trigger
   }
 }
 
+type TriggerLabelFailureAutomationResult = {
+  removed: boolean
+  warning?: string
+}
+
+async function maybeRemoveTriggerLabelOnFailureSafe(
+  config: AppConfig,
+  workspace: WorkspaceConfig,
+  issueId: string,
+  trigger: TriggerConfig | undefined
+): Promise<TriggerLabelFailureAutomationResult> {
+  if (!trigger || trigger.type !== 'label') return { removed: false }
+
+  const enabled = Boolean(workspace.automation?.labels?.removeTriggerLabelOnFailure)
+  if (!enabled) return { removed: false }
+
+  const labelName = trigger.value.trim()
+  if (!labelName) return { removed: false }
+
+  try {
+    const snapshot = await getIssueAutomationSnapshot(config.linear, issueId)
+    const label = snapshot.labels.find((l) => l.name.trim().toLowerCase() === labelName.toLowerCase())
+    if (!label) return { removed: false }
+
+    const newLabelIds = snapshot.labelIds.filter((id) => id !== label.id)
+    if (newLabelIds.length === snapshot.labelIds.length) return { removed: false }
+
+    await updateIssue(config.linear, issueId, { labelIds: newLabelIds })
+    return { removed: true }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    return { removed: false, warning: `Failed to remove trigger label "${labelName}": ${msg}` }
+  }
+}
+
+async function updateAckWithFailure(
+  config: AppConfig,
+  ackCommentId: string,
+  options: {
+    bot: WorkflowBotName
+    issueRef?: string
+    failure: WorkflowFailure
+    workspace?: WorkspaceConfig
+    issueId?: string
+    trigger?: TriggerConfig
+  }
+): Promise<void> {
+  const { bot, issueRef, failure, workspace, issueId, trigger } = options
+
+  let labelFailure: TriggerLabelFailureAutomationResult | null = null
+  if (workspace && issueId) {
+    labelFailure = await maybeRemoveTriggerLabelOnFailureSafe(config, workspace, issueId, trigger)
+  }
+
+  await updateComment(
+    config.linear,
+    ackCommentId,
+    formatFailureAck({
+      bot,
+      issueRef,
+      failure,
+      triggerLabelRemoved: Boolean(labelFailure?.removed),
+      automationWarning: labelFailure?.warning,
+    })
+  )
+}
+
 /**
  * Process the context builder request in the background
  * Flow: Context → Worktree → Sandbox Agent → Result
@@ -386,7 +454,18 @@ async function processContextRequest(
     const taskDescription = [issue.title, issue.description].filter(Boolean).join('\n\n')
 
     if (!taskDescription.trim()) {
-      await updateComment(config.linear, ackCommentId, '## Code Bot\n\nNo issue description provided.')
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Code Bot',
+        issueRef,
+        failure: {
+          code: 'NO_TASK_DESCRIPTION',
+          message: 'No issue description provided.',
+          nextSteps: ['Add a description to the issue and retry the workflow.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
@@ -403,11 +482,22 @@ async function processContextRequest(
       const contextResult = await runContextBuilder(taskDescription, workspace.localPath, config.context)
 
       if (!contextResult.success) {
-        await updateComment(
+        await createComment(
           config.linear,
-          ackCommentId,
+          issue.id,
           formatOutputForComment(contextResult, config.context.maxOutputSize)
         )
+        await updateAckWithFailure(config, ackCommentId, {
+          bot: 'Code Bot',
+          issueRef,
+          failure: {
+            code: 'UNKNOWN',
+            message: 'Context builder failed. See the latest comment for details.',
+          },
+          workspace,
+          issueId: issue.id,
+          trigger,
+        })
         return
       }
 
@@ -432,11 +522,19 @@ async function processContextRequest(
     const worktree = await createWorktree(workspace, issueRef, config.worktree)
 
     if (!worktree.success) {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## Code Bot - Worktree Failed\n\n\`\`\`\n${worktree.error}\n\`\`\``
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Code Bot',
+        issueRef,
+        failure: {
+          code: 'UNKNOWN',
+          message: 'Worktree creation failed.',
+          nextSteps: ['Check server logs for details and retry the workflow.'],
+          details: worktree.error,
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
@@ -444,12 +542,13 @@ async function processContextRequest(
 
     // Phase 3: Sandbox agent
     const runConfig = buildSandboxRunConfig(config, workspace.name, trigger)
-    await applyCodingStartAutomationSafe(config, workspace, issue.id, issue.teamId, trigger)
+    const startAutomationWarning = await applyCodingStartAutomationSafe(config, workspace, issue.id, issue.teamId, trigger)
+    const startWarningLine = startAutomationWarning ? `\n\n_Automation warning:_ ${startAutomationWarning}` : ''
 
     await updateComment(
       config.linear,
       ackCommentId,
-      `**Phase 3/3:** Agent working on task for **${issueRef}**\n\nAgent: \`${runConfig.agent}\`\nWorktree: \`${worktree.path}\`\nBranch: \`${worktree.branch}\`\n\n_This may take up to 30 minutes..._`
+      `**Phase 3/3:** Agent working on task for **${issueRef}**\n\nAgent: \`${runConfig.agent}\`\nWorktree: \`${worktree.path}\`\nBranch: \`${worktree.branch}\`\n\n_This may take up to 30 minutes..._${startWarningLine}`
     )
 
     const sandboxResult = await runSandboxAgentWorkflow(
@@ -468,17 +567,33 @@ async function processContextRequest(
       worktree,
       config.progress.includeFileChanges
     )
-    const completionStatus = sandboxResult.success ? '✅ **Completed**' : '❌ **Failed**'
-    await updateComment(
-      config.linear,
-      ackCommentId,
-      `${completionStatus} for **${issueRef}**.\n\nSee the latest comment for details.`
-    )
     await createComment(config.linear, issue.id, verificationComment)
 
-    await applyCodingSuccessAutomationSafe(config, workspace, issue.id, issue.teamId, trigger, sandboxResult)
+    const successAutomationWarning = await applyCodingSuccessAutomationSafe(config, workspace, issue.id, issue.teamId, trigger, sandboxResult)
 
-    logger.info(`[process] Completed for ${issueRef}`)
+    if (sandboxResult.success) {
+      const endWarningLine = successAutomationWarning ? `\n\n_Automation warning:_ ${successAutomationWarning}` : ''
+      await updateComment(
+        config.linear,
+        ackCommentId,
+        `✅ **Completed** for **${issueRef}**.\n\nSee the latest comment for details.${endWarningLine}`
+      )
+      logger.info(`[process] Completed for ${issueRef}`)
+    } else {
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Code Bot',
+        issueRef,
+        failure: {
+          code: 'UNKNOWN',
+          message: 'Agent run failed. See the latest comment for details.',
+          details: sandboxResult.error || undefined,
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
+      logger.info(`[process] Failed for ${issueRef}`)
+    }
 
     if (config.worktree.cleanupOnComplete) {
       await removeWorktreeSafe(workspace.localPath, worktree.path)
@@ -498,7 +613,14 @@ async function processContextRequest(
       await updateComment(
         config.linear,
         ackCommentId,
-        `## Code Bot Error\n\n\`\`\`\n${errorMessage}\n\`\`\``
+        formatFailureAck({
+          bot: 'Code Bot',
+          failure: {
+            code: 'UNKNOWN',
+            message: 'Unhandled error while running workflow.',
+            details: errorMessage,
+          },
+        })
       )
     } catch {
       logger.error('[process] Failed to post error comment')
@@ -528,7 +650,18 @@ async function processSandboxRequest(
     const taskDescription = [issue.title, issue.description].filter(Boolean).join('\n\n')
 
     if (!taskDescription.trim()) {
-      await updateComment(config.linear, ackCommentId, '## Code Bot\n\nNo issue description provided.')
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Code Bot',
+        issueRef,
+        failure: {
+          code: 'NO_TASK_DESCRIPTION',
+          message: 'No issue description provided.',
+          nextSteps: ['Add a description to the issue and retry the workflow.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
@@ -542,24 +675,33 @@ async function processSandboxRequest(
     const worktree = await createWorktree(workspace, issueRef, config.worktree)
 
     if (!worktree.success) {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## Code Bot - Worktree Failed\n\n\`\`\`\n${worktree.error}\n\`\`\``
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Code Bot',
+        issueRef,
+        failure: {
+          code: 'UNKNOWN',
+          message: 'Worktree creation failed.',
+          nextSteps: ['Check server logs for details and retry the workflow.'],
+          details: worktree.error,
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
     logger.info(`[sandbox] Worktree created at ${worktree.path}`)
 
     const runConfig = buildSandboxRunConfig(config, workspace.name, trigger)
-    await applyCodingStartAutomationSafe(config, workspace, issue.id, issue.teamId, trigger)
+    const startAutomationWarning = await applyCodingStartAutomationSafe(config, workspace, issue.id, issue.teamId, trigger)
+    const startWarningLine = startAutomationWarning ? `\n\n_Automation warning:_ ${startAutomationWarning}` : ''
 
     // Step 2: Sandbox created
     await updateComment(
       config.linear,
       ackCommentId,
-      `✅ **Sandbox created**\n\nAgent: \`${runConfig.agent}\`\nWorktree: \`${worktree.path}\`\nBranch: \`${worktree.branch}\`\n\n⏳ **Agent starting...**`
+      `✅ **Sandbox created**\n\nAgent: \`${runConfig.agent}\`\nWorktree: \`${worktree.path}\`\nBranch: \`${worktree.branch}\`\n\n⏳ **Agent starting...**${startWarningLine}`
     )
 
     // Step 3: Run sandbox agent with template prompt
@@ -578,17 +720,33 @@ async function processSandboxRequest(
       worktree,
       config.progress.includeFileChanges
     )
-    const completionStatus = sandboxResult.success ? '✅ **Completed**' : '❌ **Failed**'
-    await updateComment(
-      config.linear,
-      ackCommentId,
-      `${completionStatus} for **${issueRef}**.\n\nSee the latest comment for details.`
-    )
     await createComment(config.linear, issue.id, verificationComment)
 
-    await applyCodingSuccessAutomationSafe(config, workspace, issue.id, issue.teamId, trigger, sandboxResult)
+    const successAutomationWarning = await applyCodingSuccessAutomationSafe(config, workspace, issue.id, issue.teamId, trigger, sandboxResult)
 
-    logger.info(`[sandbox] Completed for ${issueRef}`)
+    if (sandboxResult.success) {
+      const endWarningLine = successAutomationWarning ? `\n\n_Automation warning:_ ${successAutomationWarning}` : ''
+      await updateComment(
+        config.linear,
+        ackCommentId,
+        `✅ **Completed** for **${issueRef}**.\n\nSee the latest comment for details.${endWarningLine}`
+      )
+      logger.info(`[sandbox] Completed for ${issueRef}`)
+    } else {
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Code Bot',
+        issueRef,
+        failure: {
+          code: 'UNKNOWN',
+          message: 'Agent run failed. See the latest comment for details.',
+          details: sandboxResult.error || undefined,
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
+      logger.info(`[sandbox] Failed for ${issueRef}`)
+    }
 
     if (config.worktree.cleanupOnComplete) {
       await removeWorktreeSafe(workspace.localPath, worktree.path)
@@ -608,7 +766,14 @@ async function processSandboxRequest(
       await updateComment(
         config.linear,
         ackCommentId,
-        `## Code Bot Error\n\n\`\`\`\n${errorMessage}\n\`\`\``
+        formatFailureAck({
+          bot: 'Code Bot',
+          failure: {
+            code: 'UNKNOWN',
+            message: 'Unhandled error while running quick workflow.',
+            details: errorMessage,
+          },
+        })
       )
     } catch {
       logger.error('[sandbox] Failed to post error comment')
@@ -619,7 +784,12 @@ async function processSandboxRequest(
 /**
  * Process context-only request (no worktree, no agent)
  */
-async function processContextOnly(config: AppConfig, issueId: string, ackCommentId: string): Promise<void> {
+async function processContextOnly(
+  config: AppConfig,
+  issueId: string,
+  ackCommentId: string,
+  trigger?: TriggerConfig
+): Promise<void> {
   try {
     logger.info(`[context] Fetching issue ${issueId}`)
     const issue = await getIssueWithComments(config.linear, issueId)
@@ -629,16 +799,34 @@ async function processContextOnly(config: AppConfig, issueId: string, ackComment
 
     const taskDescription = [issue.title, issue.description].filter(Boolean).join('\n\n')
     if (!taskDescription.trim()) {
-      await updateComment(config.linear, ackCommentId, '## Context Bot\n\nNo issue description provided.')
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Context Bot',
+        issueRef,
+        failure: {
+          code: 'NO_TASK_DESCRIPTION',
+          message: 'No issue description provided.',
+          nextSteps: ['Add a description to the issue and retry the workflow.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
     if (!config.context.enabled) {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        '## Context Bot\n\nRepoPrompt integration is disabled (context.enabled=false).'
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Context Bot',
+        issueRef,
+        failure: {
+          code: 'CONTEXT_DISABLED',
+          message: 'RepoPrompt integration is disabled (`context.enabled=false`).',
+          nextSteps: ['Enable `context.enabled` in `config.yaml`, then retry.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
@@ -655,12 +843,26 @@ async function processContextOnly(config: AppConfig, issueId: string, ackComment
       formatOutputForComment(contextResult, config.context.maxOutputSize)
     )
 
-    const completionStatus = contextResult.success ? '✅ **Context created**' : '❌ **Context failed**'
-    await updateComment(
-      config.linear,
-      ackCommentId,
-      `${completionStatus} for **${issueRef}**.\n\nSee the latest comment for details.`
-    )
+    if (contextResult.success) {
+      await updateComment(
+        config.linear,
+        ackCommentId,
+        `✅ **Context created** for **${issueRef}**.\n\nSee the latest comment for details.`
+      )
+      return
+    }
+
+    await updateAckWithFailure(config, ackCommentId, {
+      bot: 'Context Bot',
+      issueRef,
+      failure: {
+        code: 'UNKNOWN',
+        message: 'Context builder failed. See the latest comment for details.',
+      },
+      workspace,
+      issueId: issue.id,
+      trigger,
+    })
   } catch (error) {
     logger.error({ error }, `[context] Error processing ${issueId}`)
     await writeDeadLetter(config, {
@@ -671,11 +873,14 @@ async function processContextOnly(config: AppConfig, issueId: string, ackComment
     })
     try {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## Context Bot Error\n\n\`\`\`\n${errorMessage}\n\`\`\``
-      )
+      await updateComment(config.linear, ackCommentId, formatFailureAck({
+        bot: 'Context Bot',
+        failure: {
+          code: 'UNKNOWN',
+          message: 'Unhandled error while building context.',
+          details: errorMessage,
+        },
+      }))
     } catch {
       logger.error('[context] Failed to post error comment')
     }
@@ -685,7 +890,12 @@ async function processContextOnly(config: AppConfig, issueId: string, ackComment
 /**
  * Process plan request (RepoPrompt builder --type plan)
  */
-async function processPlanRequest(config: AppConfig, issueId: string, ackCommentId: string): Promise<void> {
+async function processPlanRequest(
+  config: AppConfig,
+  issueId: string,
+  ackCommentId: string,
+  trigger?: TriggerConfig
+): Promise<void> {
   try {
     logger.info(`[plan] Fetching issue ${issueId}`)
     const issue = await getIssue(config.linear, issueId)
@@ -695,16 +905,34 @@ async function processPlanRequest(config: AppConfig, issueId: string, ackComment
 
     const taskDescription = [issue.title, issue.description].filter(Boolean).join('\n\n')
     if (!taskDescription.trim()) {
-      await updateComment(config.linear, ackCommentId, '## Plan Bot\n\nNo issue description provided.')
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Plan Bot',
+        issueRef,
+        failure: {
+          code: 'NO_TASK_DESCRIPTION',
+          message: 'No issue description provided.',
+          nextSteps: ['Add a description to the issue and retry the workflow.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
     if (!config.context.enabled) {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        '## Plan Bot\n\nRepoPrompt integration is disabled (context.enabled=false).'
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Plan Bot',
+        issueRef,
+        failure: {
+          code: 'CONTEXT_DISABLED',
+          message: 'RepoPrompt integration is disabled (`context.enabled=false`).',
+          nextSteps: ['Enable `context.enabled` in `config.yaml`, then retry.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
@@ -721,12 +949,26 @@ async function processPlanRequest(config: AppConfig, issueId: string, ackComment
       formatPlanOutputForComment(planResult, config.context.maxOutputSize)
     )
 
-    const completionStatus = planResult.success ? '✅ **Plan created**' : '❌ **Plan failed**'
-    await updateComment(
-      config.linear,
-      ackCommentId,
-      `${completionStatus} for **${issueRef}**.\n\nSee the latest comment for details.`
-    )
+    if (planResult.success) {
+      await updateComment(
+        config.linear,
+        ackCommentId,
+        `✅ **Plan created** for **${issueRef}**.\n\nSee the latest comment for details.`
+      )
+      return
+    }
+
+    await updateAckWithFailure(config, ackCommentId, {
+      bot: 'Plan Bot',
+      issueRef,
+      failure: {
+        code: 'UNKNOWN',
+        message: 'Plan generation failed. See the latest comment for details.',
+      },
+      workspace,
+      issueId: issue.id,
+      trigger,
+    })
   } catch (error) {
     logger.error({ error }, `[plan] Error processing ${issueId}`)
     await writeDeadLetter(config, {
@@ -737,11 +979,14 @@ async function processPlanRequest(config: AppConfig, issueId: string, ackComment
     })
     try {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## Plan Bot Error\n\n\`\`\`\n${errorMessage}\n\`\`\``
-      )
+      await updateComment(config.linear, ackCommentId, formatFailureAck({
+        bot: 'Plan Bot',
+        failure: {
+          code: 'UNKNOWN',
+          message: 'Unhandled error while generating plan.',
+          details: errorMessage,
+        },
+      }))
     } catch {
       logger.error('[plan] Failed to post error comment')
     }
@@ -772,7 +1017,12 @@ async function assertIsGitWorktree(pathToRepo: string): Promise<void> {
 /**
  * Process code review request (Sandbox Agent; read-only; posts review to Linear)
  */
-async function processReviewRequest(config: AppConfig, issueId: string, ackCommentId: string): Promise<void> {
+async function processReviewRequest(
+  config: AppConfig,
+  issueId: string,
+  ackCommentId: string,
+  trigger?: TriggerConfig
+): Promise<void> {
   try {
     logger.info(`[review] Fetching issue ${issueId}`)
     const issue = await getIssueWithComments(config.linear, issueId)
@@ -786,15 +1036,45 @@ async function processReviewRequest(config: AppConfig, issueId: string, ackComme
     try {
       await assertIsGitWorktree(spec.path)
     } catch {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## Review Bot\n\nNo worktree found for **${issueRef}**.\n\nRun the \`code\` label workflow first, then apply \`review\`.`
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Review Bot',
+        issueRef,
+        failure: {
+          code: 'NO_WORKTREE',
+          message: `No worktree found for **${issueRef}**.`,
+          nextSteps: ['Run the `code` workflow first, then re-apply the `review` label.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
-    const base = await getOriginHeadRef(workspace.localPath)
+    let base: { remoteRef: string; branch: string }
+    try {
+      base = await getOriginHeadRef(workspace.localPath)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Review Bot',
+        issueRef,
+        failure: {
+          code: 'ORIGIN_HEAD_UNRESOLVED',
+          message: 'Unable to resolve the base branch from `origin/HEAD`.',
+          nextSteps: [
+            'Ensure the repo has a remote `origin` with a default branch.',
+            'Run `git remote set-head origin --auto` in the main repo checkout.',
+            'Then retry the `review` workflow.',
+          ],
+          details: msg,
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
+      return
+    }
 
     const diffStat = await $`git diff --stat ${base.remoteRef}...HEAD`.cwd(spec.path).quiet().text()
     const diff = await $`git diff ${base.remoteRef}...HEAD`.cwd(spec.path).quiet().text()
@@ -887,12 +1167,27 @@ _Session:_ \`${result.sessionId}\`${warningLine}${errorBlock}`
 
     await createComment(config.linear, issue.id, body)
 
-    const completionStatus = result.success ? '✅ **Review completed**' : '❌ **Review failed**'
-    await updateComment(
-      config.linear,
-      ackCommentId,
-      `${completionStatus} for **${issueRef}**.\n\nSee the latest comment for details.`
-    )
+    if (result.success) {
+      await updateComment(
+        config.linear,
+        ackCommentId,
+        `✅ **Review completed** for **${issueRef}**.\n\nSee the latest comment for details.`
+      )
+      return
+    }
+
+    await updateAckWithFailure(config, ackCommentId, {
+      bot: 'Review Bot',
+      issueRef,
+      failure: {
+        code: 'UNKNOWN',
+        message: 'Review run failed. See the latest comment for details.',
+        details: result.error || undefined,
+      },
+      workspace,
+      issueId: issue.id,
+      trigger,
+    })
   } catch (error) {
     logger.error({ error }, `[review] Error processing ${issueId}`)
     await writeDeadLetter(config, {
@@ -906,7 +1201,14 @@ _Session:_ \`${result.sessionId}\`${warningLine}${errorBlock}`
       await updateComment(
         config.linear,
         ackCommentId,
-        `## Review Bot Error\n\n\`\`\`\n${errorMessage}\n\`\`\``
+        formatFailureAck({
+          bot: 'Review Bot',
+          failure: {
+            code: 'UNKNOWN',
+            message: 'Unhandled error while running review.',
+            details: errorMessage,
+          },
+        })
       )
     } catch {
       logger.error('[review] Failed to post error comment')
@@ -962,7 +1264,12 @@ function extractFirstUrl(text: string): string | null {
 /**
  * Process GitHub publish request (commit/push/PR via gh; posts PR link to Linear)
  */
-async function processGithubRequest(config: AppConfig, issueId: string, ackCommentId: string): Promise<void> {
+async function processGithubRequest(
+  config: AppConfig,
+  issueId: string,
+  ackCommentId: string,
+  trigger?: TriggerConfig
+): Promise<void> {
   try {
     logger.info(`[github] Fetching issue ${issueId}`)
     const issue = await getIssue(config.linear, issueId)
@@ -971,21 +1278,35 @@ async function processGithubRequest(config: AppConfig, issueId: string, ackComme
     const workspace = resolveWorkspaceForIssue(config, issue)
 
     if (!config.github.enabled) {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        '## GitHub Bot\n\nGitHub integration is disabled (github.enabled=false).'
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'GitHub Bot',
+        issueRef,
+        failure: {
+          code: 'GITHUB_DISABLED',
+          message: 'GitHub integration is disabled (`github.enabled=false`).',
+          nextSteps: ['Enable `github.enabled` and configure `github.repos[]`, then retry.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
     const repoConfig = await resolveGitHubRepoForWorkspace(config, workspace.name)
     if (!repoConfig) {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## GitHub Bot\n\nNo GitHub repo configured for workspace: \`${workspace.name}\`.`
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'GitHub Bot',
+        issueRef,
+        failure: {
+          code: 'GITHUB_REPO_NOT_CONFIGURED',
+          message: `No GitHub repo configured for workspace: \`${workspace.name}\`.`,
+          nextSteps: ['Add a matching entry to `github.repos[]`, then retry.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
@@ -993,11 +1314,18 @@ async function processGithubRequest(config: AppConfig, issueId: string, ackComme
     try {
       await assertIsGitWorktree(spec.path)
     } catch {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## GitHub Bot\n\nNo worktree found for **${issueRef}**.\n\nRun the \`code\` label workflow first, then apply \`github\`.`
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'GitHub Bot',
+        issueRef,
+        failure: {
+          code: 'NO_WORKTREE',
+          message: `No worktree found for **${issueRef}**.`,
+          nextSteps: ['Run the `code` workflow first, then re-apply the `github` label.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
@@ -1008,16 +1336,45 @@ async function processGithubRequest(config: AppConfig, issueId: string, ackComme
     )
 
     // Ensure gh is available and authenticated (non-interactive).
-    await $`gh --version`.quiet()
+    try {
+      await $`gh --version`.quiet()
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'GitHub Bot',
+        issueRef,
+        failure: {
+          code: 'UNKNOWN',
+          message: 'GitHub CLI (`gh`) is not available or not authenticated.',
+          nextSteps: [
+            'Install `gh` and authenticate it on the host running this service.',
+            'Then retry the `github` workflow.',
+          ],
+          details: msg,
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
+      return
+    }
 
     const status = await $`git status --porcelain`.cwd(spec.path).quiet().text()
     if (status.trim()) {
       if (!config.github.autoCommit) {
-        await updateComment(
-          config.linear,
-          ackCommentId,
-          `## GitHub Bot\n\nWorktree has uncommitted changes. Commit them, or set \`github.autoCommit: true\`.\n\nWorktree: \`${spec.path}\``
-        )
+        await updateAckWithFailure(config, ackCommentId, {
+          bot: 'GitHub Bot',
+          issueRef,
+          failure: {
+            code: 'WORKTREE_DIRTY',
+            message: 'Worktree has uncommitted changes.',
+            nextSteps: ['Commit the changes in the worktree, or set `github.autoCommit: true`, then retry.'],
+            details: `Worktree: ${spec.path}`,
+          },
+          workspace,
+          issueId: issue.id,
+          trigger,
+        })
         return
       }
 
@@ -1099,7 +1456,14 @@ PR: ${prUrl}
       await updateComment(
         config.linear,
         ackCommentId,
-        `## GitHub Bot Error\n\n\`\`\`\n${errorMessage}\n\`\`\``
+        formatFailureAck({
+          bot: 'GitHub Bot',
+          failure: {
+            code: 'UNKNOWN',
+            message: 'Unhandled error while publishing PR.',
+            details: errorMessage,
+          },
+        })
       )
     } catch {
       logger.error('[github] Failed to post error comment')
@@ -1258,7 +1622,12 @@ _Session:_ \`${result.sessionId}\`${warningLine}${errorBlock}`
 /**
  * Process user guide request (no worktree, sandbox only)
  */
-async function processGuideRequest(config: AppConfig, issueId: string, ackCommentId: string): Promise<void> {
+async function processGuideRequest(
+  config: AppConfig,
+  issueId: string,
+  ackCommentId: string,
+  trigger?: TriggerConfig
+): Promise<void> {
   try {
     logger.info(`[guide] Fetching issue ${issueId}`)
     const issue = await getIssueWithComments(config.linear, issueId)
@@ -1268,12 +1637,34 @@ async function processGuideRequest(config: AppConfig, issueId: string, ackCommen
 
     const guide = workspace.guide
     if (!guide || guide.enabled === false) {
-      await updateComment(config.linear, ackCommentId, '## Guide Bot\n\nGuide workflow is not enabled for this workspace.')
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Guide Bot',
+        issueRef,
+        failure: {
+          code: 'GUIDE_DISABLED',
+          message: 'Guide workflow is not enabled for this workspace.',
+          nextSteps: ['Enable `linear.workspaces[].guide.enabled`, then retry.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       return
     }
 
     if (!guide.docsPath) {
-      await updateComment(config.linear, ackCommentId, '## Guide Bot\n\nGuide docsPath is missing for this workspace.')
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Guide Bot',
+        issueRef,
+        failure: {
+          code: 'GUIDE_MISSING_DOCS_PATH',
+          message: 'Guide `docsPath` is missing for this workspace.',
+          nextSteps: ['Set `linear.workspaces[].guide.docsPath` to a writable directory, then retry.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       await writeDeadLetter(config, {
         timestamp: new Date().toISOString(),
         issueId,
@@ -1298,11 +1689,18 @@ async function processGuideRequest(config: AppConfig, issueId: string, ackCommen
     const username = process.env[usernameEnv]
     const password = process.env[passwordEnv]
     if (!username || !password) {
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## Guide Bot Error\n\nMissing credentials. Ensure ${usernameEnv} and ${passwordEnv} are set.`
-      )
+      await updateAckWithFailure(config, ackCommentId, {
+        bot: 'Guide Bot',
+        issueRef,
+        failure: {
+          code: 'GUIDE_MISSING_CREDENTIALS',
+          message: `Missing credentials. Ensure \`${usernameEnv}\` and \`${passwordEnv}\` are set.`,
+          nextSteps: ['Set the env vars on the host running the service, restart the process, then retry.'],
+        },
+        workspace,
+        issueId: issue.id,
+        trigger,
+      })
       await writeDeadLetter(config, {
         timestamp: new Date().toISOString(),
         issueId,
@@ -1331,13 +1729,28 @@ async function processGuideRequest(config: AppConfig, issueId: string, ackCommen
     }, ackCommentId, runConfig)
 
     const completionComment = formatGuideResultComment(issueRef, guideFile, guide.docsBaseUrl, result)
-    const completionStatus = result.success ? '✅ **Completed**' : '❌ **Failed**'
-    await updateComment(
-      config.linear,
-      ackCommentId,
-      `${completionStatus} for **${issueRef}**.\n\nSee the latest comment for details.`
-    )
     await createComment(config.linear, issue.id, completionComment)
+
+    if (result.success) {
+      await updateComment(
+        config.linear,
+        ackCommentId,
+        `✅ **Completed** for **${issueRef}**.\n\nSee the latest comment for details.`
+      )
+      return
+    }
+
+    await updateAckWithFailure(config, ackCommentId, {
+      bot: 'Guide Bot',
+      issueRef,
+      failure: {
+        code: 'UNKNOWN',
+        message: 'Guide workflow failed. See the latest comment for details.',
+      },
+      workspace,
+      issueId: issue.id,
+      trigger,
+    })
   } catch (error) {
     logger.error({ error }, `[guide] Error processing ${issueId}`)
     await writeDeadLetter(config, {
@@ -1349,11 +1762,14 @@ async function processGuideRequest(config: AppConfig, issueId: string, ackCommen
 
     try {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      await updateComment(
-        config.linear,
-        ackCommentId,
-        `## Guide Bot Error\n\n\`\`\`\n${errorMessage}\n\`\`\``
-      )
+      await updateComment(config.linear, ackCommentId, formatFailureAck({
+        bot: 'Guide Bot',
+        failure: {
+          code: 'UNKNOWN',
+          message: 'Unhandled error while generating guide.',
+          details: errorMessage,
+        },
+      }))
     } catch {
       logger.error('[guide] Failed to post error comment')
     }
@@ -1528,17 +1944,20 @@ async function applyCodingStartAutomationSafe(
   issueId: string,
   teamId: string | undefined,
   trigger?: TriggerConfig
-): Promise<void> {
+): Promise<string | null> {
   const desired = workspace.automation?.coding?.setInProgressState?.trim()
-  if (!desired) return
-  if (!teamId) return
+  if (!desired) return null
+  if (!teamId) return null
 
   try {
     const stateId = await resolveWorkflowStateId(config.linear, teamId, desired)
     await updateIssue(config.linear, issueId, { stateId })
     logger.info({ issueId, teamId, stateId, trigger: trigger?.value }, '[automation] Moved issue to In Progress')
+    return null
   } catch (error) {
     logger.warn({ error, issueId, teamId, desired, trigger: trigger?.value }, '[automation] Failed to move issue to In Progress')
+    const msg = error instanceof Error ? error.message : String(error)
+    return `Failed to move issue to "${desired}": ${msg}`
   }
 }
 
@@ -1549,17 +1968,17 @@ async function applyCodingSuccessAutomationSafe(
   teamId: string | undefined,
   trigger: TriggerConfig | undefined,
   result: SandboxResult
-): Promise<void> {
-  if (!result.success) return
+): Promise<string | null> {
+  if (!result.success) return null
 
   const coding = workspace.automation?.coding
-  if (!coding) return
+  if (!coding) return null
 
   const desiredReview = coding.setInReviewStateOnSuccess?.trim()
   const shouldRemoveLabel = Boolean(coding.removeTriggerLabelOnSuccess)
 
-  if (!desiredReview && !shouldRemoveLabel) return
-  if (!teamId) return
+  if (!desiredReview && !shouldRemoveLabel) return null
+  if (!teamId) return null
 
   try {
     const update: { stateId?: string; labelIds?: string[] } = {}
@@ -1582,15 +2001,18 @@ async function applyCodingSuccessAutomationSafe(
       }
     }
 
-    if (!update.stateId && !update.labelIds) return
+    if (!update.stateId && !update.labelIds) return null
     await updateIssue(config.linear, issueId, update)
 
     logger.info(
       { issueId, teamId, stateId: update.stateId, removedLabel: trigger?.type === 'label' ? trigger.value : undefined },
       '[automation] Applied success automation'
     )
+    return null
   } catch (error) {
     logger.warn({ error, issueId, teamId, trigger: trigger?.value }, '[automation] Failed to apply success automation')
+    const msg = error instanceof Error ? error.message : String(error)
+    return `Failed to apply success automation: ${msg}`
   }
 }
 

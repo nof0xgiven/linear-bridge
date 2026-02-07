@@ -59,6 +59,13 @@ Optional automation lives under `linear.workspaces[].automation`.
 
 Currently supported:
 
+### `automation.labels`
+
+Applies to all label-triggered workflows.
+
+Fields:
+- `removeTriggerLabelOnFailure`: If true, remove the triggering label when a workflow fails so you can re-add it to retry (default: false).
+
 ### `automation.coding`
 
 Applies to coding workflows that create a worktree and run an agent (`quick` and `full`).
