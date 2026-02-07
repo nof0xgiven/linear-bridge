@@ -1,0 +1,105 @@
+version: "1.0"
+
+server:
+  port: 4747
+  host: "0.0.0.0"
+  logLevel: "info"
+
+bot:
+  mentionName: "et"
+
+linear:
+  apiKey: ${LINEAR_API_KEY}
+  webhookSecret: ${LINEAR_WEBHOOK_SECRET}
+  workspaces:
+    - name: "Main Workspace"
+      teamId: "team_abc123"
+      projectIds: []
+      localPath: "/path/to/repo"
+      automation:
+        coding:
+          setInProgressState: "In Progress"
+          setInReviewStateOnSuccess: "In Review"
+          removeTriggerLabelOnSuccess: true
+      guide:
+        enabled: true
+        docsPath: "/path/to/docs"
+        docsBaseUrl: ${GUIDE_DOCS_BASE_URL}
+        serverUrl: "http://localhost:3000"
+        usernameEnv: "GUIDE_USERNAME"
+        passwordEnv: "GUIDE_PASSWORD"
+        templatePath: "templates/user_guide.md"
+        screenshotsDir: "assets/guides/{ISSUE_ID}"
+  triggers:
+    - type: "label"
+      value: "discovery"
+      action: "context"
+      on: ["create", "update"]
+    - type: "label"
+      value: "plan"
+      action: "plan"
+      on: ["create", "update"]
+    - type: "label"
+      value: "code"
+      action: "quick"
+      on: ["create", "update"]
+    - type: "label"
+      value: "claude"
+      action: "quick"
+      agent: "claude"
+      on: ["create", "update"]
+    - type: "label"
+      value: "codex"
+      action: "quick"
+      agent: "codex"
+      on: ["create", "update"]
+    - type: "label"
+      value: "review"
+      action: "review"
+      on: ["create", "update"]
+    - type: "label"
+      value: "guide"
+      action: "guide"
+      on: ["create", "update"]
+    - type: "label"
+      value: "github"
+      action: "github"
+      on: ["create", "update"]
+    - type: "mention"
+      value: "@claude"
+      action: "reply"
+      agent: "claude"
+      on: ["create"]
+    - type: "mention"
+      value: "@codex"
+      action: "reply"
+      agent: "codex"
+      on: ["create"]
+
+sandbox:
+  default:
+    agent: "claude"
+    permissionMode: "default"
+    timeoutMs: 1800000
+    reasoning: "high"
+
+context:
+  enabled: true
+
+worktree:
+  nameTemplate: "{WORKSPACE_PATH}-worktrees/{ISSUE_ID}"
+  branchTemplate: "fix/{ISSUE_ID}"
+  postCreateScript: "{WORKSPACE_PATH}/.conductor/clone-env.sh"
+  cleanupOnComplete: false
+
+progress:
+  updateIntervalMs: 60000
+  includeToolCalls: true
+  includeFileChanges: true
+
+advanced:
+  enableTelemetry: true
+  enableMetrics: true
+  enableHealthCheck: true
+  enableInspector: false
+  deadLetterPath: "logs/dead-letter.jsonl"

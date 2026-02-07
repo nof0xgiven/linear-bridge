@@ -1,0 +1,649 @@
+{
+  "$ref": "#/definitions/EnhanceTicketConfig",
+  "definitions": {
+    "EnhanceTicketConfig": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "default": "1.0"
+        },
+        "server": {
+          "type": "object",
+          "properties": {
+            "port": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 4747
+            },
+            "host": {
+              "type": "string",
+              "minLength": 1,
+              "default": "0.0.0.0"
+            },
+            "logLevel": {
+              "type": "string",
+              "enum": [
+                "fatal",
+                "error",
+                "warn",
+                "info",
+                "debug",
+                "trace"
+              ],
+              "default": "info"
+            },
+            "rateLimit": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "windowMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 60000
+                },
+                "max": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 60
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false
+        },
+        "linear": {
+          "type": "object",
+          "properties": {
+            "apiKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "webhookSecret": {
+              "type": "string",
+              "minLength": 1
+            },
+            "oauth": {
+              "type": "object",
+              "properties": {
+                "clientId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "clientSecret": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "redirectUri": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "workspaces": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "teamId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "projectIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "default": []
+                  },
+                  "localPath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "automation": {
+                    "type": "object",
+                    "properties": {
+                      "coding": {
+                        "type": "object",
+                        "properties": {
+                          "setInProgressState": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "setInReviewStateOnSuccess": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "removeTriggerLabelOnSuccess": {
+                            "type": "boolean",
+                            "default": true
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "guide": {
+                    "type": "object",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "default": true
+                      },
+                      "docsPath": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "docsBaseUrl": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "serverUrl": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": "http://localhost:3000"
+                      },
+                      "usernameEnv": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": "GUIDE_USERNAME"
+                      },
+                      "passwordEnv": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": "GUIDE_PASSWORD"
+                      },
+                      "templatePath": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": "templates/user_guide.md"
+                      },
+                      "screenshotsDir": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": "assets/guides/{ISSUE_ID}"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "name",
+                  "teamId",
+                  "localPath"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            },
+            "triggers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "label",
+                      "hashtag",
+                      "mention"
+                    ]
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "full",
+                      "quick",
+                      "context",
+                      "guide",
+                      "plan",
+                      "reply",
+                      "review",
+                      "github"
+                    ]
+                  },
+                  "agent": {
+                    "type": "string",
+                    "enum": [
+                      "claude",
+                      "codex",
+                      "opencode",
+                      "amp"
+                    ]
+                  },
+                  "on": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "create",
+                        "update",
+                        "remove"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "value",
+                  "action"
+                ],
+                "additionalProperties": false
+              },
+              "default": []
+            }
+          },
+          "required": [
+            "apiKey",
+            "webhookSecret",
+            "workspaces"
+          ],
+          "additionalProperties": false
+        },
+        "sandbox": {
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "object",
+              "properties": {
+                "agent": {
+                  "$ref": "#/definitions/EnhanceTicketConfig/properties/linear/properties/triggers/items/properties/agent"
+                },
+                "agentMode": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "permissionMode": {
+                  "type": "string",
+                  "enum": [
+                    "default",
+                    "plan",
+                    "bypass"
+                  ],
+                  "default": "default"
+                },
+                "timeoutMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 1800000
+                },
+                "progressIntervalMs": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "default": 60000
+                },
+                "reasoning": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "promptPrefix": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "promptSuffix": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "agent"
+              ],
+              "additionalProperties": false
+            },
+            "overrides": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "agent": {
+                    "$ref": "#/definitions/EnhanceTicketConfig/properties/linear/properties/triggers/items/properties/agent"
+                  },
+                  "agentMode": {
+                    "$ref": "#/definitions/EnhanceTicketConfig/properties/sandbox/properties/default/properties/agentMode"
+                  },
+                  "permissionMode": {
+                    "$ref": "#/definitions/EnhanceTicketConfig/properties/sandbox/properties/default/properties/permissionMode"
+                  },
+                  "timeoutMs": {
+                    "$ref": "#/definitions/EnhanceTicketConfig/properties/sandbox/properties/default/properties/timeoutMs"
+                  },
+                  "progressIntervalMs": {
+                    "$ref": "#/definitions/EnhanceTicketConfig/properties/sandbox/properties/default/properties/progressIntervalMs"
+                  },
+                  "reasoning": {
+                    "$ref": "#/definitions/EnhanceTicketConfig/properties/sandbox/properties/default/properties/reasoning"
+                  },
+                  "promptPrefix": {
+                    "$ref": "#/definitions/EnhanceTicketConfig/properties/sandbox/properties/default/properties/promptPrefix"
+                  },
+                  "promptSuffix": {
+                    "$ref": "#/definitions/EnhanceTicketConfig/properties/sandbox/properties/default/properties/promptSuffix"
+                  },
+                  "workspace": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "additionalProperties": false
+              },
+              "default": []
+            },
+            "connection": {
+              "type": "object",
+              "properties": {
+                "baseUrl": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "token": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "host": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "port": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "required": [
+            "default"
+          ],
+          "additionalProperties": false
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "default": "rp-cli -e 'context_builder task=\"{TASK}\"'"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 600000
+            },
+            "maxOutputSize": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 50000
+            }
+          },
+          "additionalProperties": false
+        },
+        "worktree": {
+          "type": "object",
+          "properties": {
+            "nameTemplate": {
+              "type": "string",
+              "minLength": 1,
+              "default": "{WORKSPACE_PATH}-worktrees/{ISSUE_ID}"
+            },
+            "branchTemplate": {
+              "type": "string",
+              "minLength": 1,
+              "default": "fix/{ISSUE_ID}"
+            },
+            "postCreateScript": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cleanupOnComplete": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "updateIntervalMs": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 60000
+            },
+            "includeToolCalls": {
+              "type": "boolean",
+              "default": true
+            },
+            "includeFileChanges": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "bot": {
+          "type": "object",
+          "properties": {
+            "mentionName": {
+              "type": "string",
+              "minLength": 1,
+              "default": "et"
+            }
+          },
+          "additionalProperties": false
+        },
+        "mentionReply": {
+          "type": "object",
+          "properties": {
+            "templatePath": {
+              "type": "string",
+              "minLength": 1,
+              "default": "templates/mention_reply.md"
+            },
+            "stripMention": {
+              "type": "boolean",
+              "default": true
+            },
+            "maxAnswerChars": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 50000
+            },
+            "maxContextComments": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 10
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "review": {
+          "type": "object",
+          "properties": {
+            "templatePath": {
+              "type": "string",
+              "minLength": 1,
+              "default": "templates/review.md"
+            },
+            "maxDiffChars": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 120000
+            },
+            "maxContextComments": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 10
+            },
+            "maxCommentChars": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "default": 50000
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "github": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "webhookSecret": {
+              "type": "string",
+              "minLength": 1
+            },
+            "autoCommit": {
+              "type": "boolean",
+              "default": false
+            },
+            "commitMessageTemplate": {
+              "type": "string",
+              "minLength": 1,
+              "default": "{ISSUE_ID}: {ISSUE_TITLE}"
+            },
+            "repos": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "workspace": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "remote": {
+                    "type": "string",
+                    "minLength": 1,
+                    "default": "origin"
+                  },
+                  "baseBranch": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "pr": {
+                    "type": "object",
+                    "properties": {
+                      "draft": {
+                        "type": "boolean",
+                        "default": true
+                      },
+                      "titleTemplate": {
+                        "type": "string",
+                        "minLength": 1,
+                        "default": "{ISSUE_ID}: {ISSUE_TITLE}"
+                      },
+                      "bodyTemplatePath": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false,
+                    "default": {}
+                  }
+                },
+                "required": [
+                  "workspace",
+                  "repo"
+                ],
+                "additionalProperties": false
+              },
+              "default": []
+            },
+            "cleanup": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "removeWorktreeOnMerge": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "deleteBranchOnMerge": {
+                  "type": "boolean",
+                  "default": true
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            }
+          },
+          "additionalProperties": false,
+          "default": {}
+        },
+        "advanced": {
+          "type": "object",
+          "properties": {
+            "enableTelemetry": {
+              "type": "boolean",
+              "default": true
+            },
+            "enableMetrics": {
+              "type": "boolean",
+              "default": true
+            },
+            "enableHealthCheck": {
+              "type": "boolean",
+              "default": true
+            },
+            "enableInspector": {
+              "type": "boolean",
+              "default": false
+            },
+            "deadLetterPath": {
+              "type": "string",
+              "minLength": 1,
+              "default": "logs/dead-letter.jsonl"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "server",
+        "linear",
+        "sandbox",
+        "context",
+        "worktree",
+        "progress",
+        "bot",
+        "advanced"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -1,0 +1,193 @@
+version: "1.0"
+
+server:
+  port: 4747
+  host: "0.0.0.0"
+  logLevel: "info"
+  rateLimit:
+    enabled: true
+    windowMs: 60000
+    max: 60
+
+bot:
+  mentionName: "et"
+
+linear:
+  apiKey: ${LINEAR_API_KEY}
+  webhookSecret: ${LINEAR_WEBHOOK_SECRET}
+  oauth:
+    clientId: ${LINEAR_CLIENT_ID}
+    clientSecret: ${LINEAR_CLIENT_SECRET}
+    redirectUri: "https://your-public-host/oauth/callback"
+
+  workspaces:
+    - name: "Platform"
+      teamId: "team_abc123"
+      projectIds: ["proj_123", "proj_456"]
+      localPath: "/path/to/repo"
+      automation:
+        coding:
+          setInProgressState: "In Progress"
+          setInReviewStateOnSuccess: "In Review"
+          removeTriggerLabelOnSuccess: true
+      guide:
+        enabled: true
+        docsPath: "/path/to/docs"
+        docsBaseUrl: ${GUIDE_DOCS_BASE_URL}
+        serverUrl: "http://localhost:3000"
+        usernameEnv: "GUIDE_USERNAME"
+        passwordEnv: "GUIDE_PASSWORD"
+        templatePath: "templates/user_guide.md"
+        screenshotsDir: "assets/guides/{ISSUE_ID}"
+
+    - name: "Marketing"
+      teamId: "team_xyz789"
+      projectIds: ["proj_789"]
+      localPath: "/path/to/marketing"
+      guide:
+        enabled: false
+
+  triggers:
+    - type: "label"
+      value: "discovery"
+      action: "context"
+      on: ["create", "update"]
+
+    - type: "label"
+      value: "plan"
+      action: "plan"
+      on: ["create", "update"]
+
+    - type: "label"
+      value: "code"
+      action: "quick"
+      on: ["create", "update"]
+
+    - type: "label"
+      value: "claude"
+      action: "quick"
+      agent: "claude"
+      on: ["create", "update"]
+
+    - type: "label"
+      value: "codex"
+      action: "quick"
+      agent: "codex"
+      on: ["create", "update"]
+
+    - type: "label"
+      value: "review"
+      action: "review"
+      on: ["create", "update"]
+
+    - type: "label"
+      value: "guide"
+      action: "guide"
+      on: ["create", "update"]
+
+    - type: "label"
+      value: "github"
+      action: "github"
+      on: ["create", "update"]
+
+    - type: "mention"
+      value: "@claude"
+      action: "reply"
+      agent: "claude"
+      on: ["create"]
+
+    - type: "mention"
+      value: "@codex"
+      action: "reply"
+      agent: "codex"
+      on: ["create"]
+
+    # Optional: hashtag triggers (de-emphasized; labels are recommended)
+    # - type: "hashtag"
+    #   value: "#et"
+    #   action: "context"
+    #   on: ["create"]
+    # - type: "hashtag"
+    #   value: "#sandbox"
+    #   action: "quick"
+    #   on: ["create"]
+
+mentionReply:
+  templatePath: "templates/mention_reply.md"
+  stripMention: true
+  maxAnswerChars: 50000
+  maxContextComments: 10
+
+review:
+  templatePath: "templates/review.md"
+  maxDiffChars: 120000
+  maxContextComments: 10
+  maxCommentChars: 50000
+
+github:
+  enabled: false
+  # webhookSecret: ${GITHUB_WEBHOOK_SECRET} # required only for cleanup on merge
+  autoCommit: false
+  commitMessageTemplate: "{ISSUE_ID}: {ISSUE_TITLE}"
+  repos:
+    - workspace: "Platform"
+      repo: "org/repo"
+      remote: "origin"
+      pr:
+        draft: true
+        titleTemplate: "{ISSUE_ID}: {ISSUE_TITLE}"
+        # bodyTemplatePath: "templates/pr_body.md"
+  cleanup:
+    enabled: false
+    removeWorktreeOnMerge: true
+    deleteBranchOnMerge: true
+
+sandbox:
+  default:
+    agent: "claude"
+    agentMode: "code"
+    permissionMode: "default"
+    timeoutMs: 1800000
+    progressIntervalMs: 60000
+    reasoning: "high"
+    promptPrefix: "Follow repo conventions and prioritize correctness."
+    promptSuffix: "Summarize changes and verification steps."
+
+  overrides:
+    - workspace: "Platform"
+      agentMode: "build"
+      timeoutMs: 3600000
+
+    - workspace: "Marketing"
+      agent: "codex"
+      agentMode: "quick"
+      timeoutMs: 900000
+
+  connection:
+    token: ${SANDBOX_TOKEN}
+    host: "127.0.0.1"
+    port: 2468
+
+context:
+  enabled: true
+  command: "rp-cli -e 'context_builder task=\"{TASK}\"'"
+  timeoutMs: 600000
+  maxOutputSize: 50000
+
+worktree:
+  nameTemplate: "{WORKSPACE_PATH}-worktrees/{ISSUE_ID}"
+  branchTemplate: "fix/{ISSUE_ID}"
+  postCreateScript: "{WORKSPACE_PATH}/.conductor/clone-env.sh"
+  cleanupOnComplete: false
+
+progress:
+  updateIntervalMs: 60000
+  includeToolCalls: true
+  includeFileChanges: true
+
+advanced:
+  enableTelemetry: true
+  enableMetrics: true
+  enableHealthCheck: true
+  enableInspector: false
+  deadLetterPath: "logs/dead-letter.jsonl"

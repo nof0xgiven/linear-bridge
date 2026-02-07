@@ -1,0 +1,73 @@
+version: "1.0"
+
+server:
+  port: 4747
+  host: "0.0.0.0"
+  logLevel: "info"
+
+linear:
+  apiKey: ${LINEAR_API_KEY}
+  webhookSecret: ${LINEAR_WEBHOOK_SECRET}
+  workspaces:
+    - name: "Platform"
+      teamId: "team_platform"
+      projectIds: ["proj_api", "proj_web"]
+      localPath: "/path/to/platform"
+
+    - name: "Marketing"
+      teamId: "team_marketing"
+      projectIds: ["proj_site"]
+      localPath: "/path/to/marketing"
+
+  triggers:
+    - type: "label"
+      value: "discovery"
+      action: "context"
+      on: ["create", "update"]
+    - type: "label"
+      value: "plan"
+      action: "plan"
+      on: ["create", "update"]
+    - type: "label"
+      value: "code"
+      action: "quick"
+      on: ["create", "update"]
+    - type: "label"
+      value: "review"
+      action: "review"
+      on: ["create", "update"]
+    - type: "label"
+      value: "guide"
+      action: "guide"
+      on: ["create", "update"]
+    - type: "label"
+      value: "github"
+      action: "github"
+      on: ["create", "update"]
+    - type: "mention"
+      value: "@claude"
+      action: "reply"
+      agent: "claude"
+      on: ["create"]
+    - type: "mention"
+      value: "@codex"
+      action: "reply"
+      agent: "codex"
+      on: ["create"]
+
+sandbox:
+  default:
+    agent: "claude"
+    permissionMode: "default"
+    timeoutMs: 1800000
+  overrides:
+    - workspace: "Platform"
+      agentMode: "build"
+      timeoutMs: 3600000
+    - workspace: "Marketing"
+      agent: "codex"
+      agentMode: "quick"
+      timeoutMs: 900000
+
+context:
+  enabled: true

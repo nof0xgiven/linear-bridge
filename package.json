@@ -1,0 +1,32 @@
+{
+  "name": "enhance-ticket",
+  "version": "1.0.0",
+  "description": "Linear webhook service that runs RepoPrompt and Sandbox Agent workflows from Linear labels and mentions",
+  "type": "module",
+  "bin": {
+    "enhance-ticket": "dist/cli/index.js"
+  },
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun build src/index.ts src/cli/index.ts --outdir dist --target bun",
+    "generate:schema": "bun scripts/generate-config-schema.ts"
+  },
+  "dependencies": {
+    "@linear/sdk": "^32.0.0",
+    "commander": "^12.1.0",
+    "hono": "^4.7.4",
+    "pino": "^9.6.0",
+    "prom-client": "^15.1.3",
+    "sandbox-agent": "^0.1.5",
+    "yaml": "^2.6.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.2",
+    "typescript": "^5.7.3",
+    "zod-to-json-schema": "^3.24.1"
+  }
+}
