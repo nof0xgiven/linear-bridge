@@ -31,6 +31,39 @@ const DEDUP_WINDOW_MS = 30_000 // 30 seconds
 const processedEvents = new Map<string, number>()
 
 /**
+ * In-memory cache of last-seen issue label IDs.
+ *
+ * Linear's `updatedFrom.labelIds` is not guaranteed to be present on Issue update webhooks.
+ * To still detect "label was newly added" for label triggers, we fall back to this cache
+ * when `updatedFrom.labelIds` is missing.
+ */
+const ISSUE_LABEL_CACHE_TTL_MS = 10 * 60_000 // 10 minutes
+const issueLabelIdsCache = new Map<string, { seenAtMs: number; labelIds: string[] }>()
+
+function getCachedIssueLabelIds(issueId: string): string[] | undefined {
+  const cached = issueLabelIdsCache.get(issueId)
+  if (!cached) return undefined
+  if ((Date.now() - cached.seenAtMs) > ISSUE_LABEL_CACHE_TTL_MS) {
+    issueLabelIdsCache.delete(issueId)
+    return undefined
+  }
+  return cached.labelIds.slice()
+}
+
+function setCachedIssueLabelIds(issueId: string, labelIds: string[]): void {
+  issueLabelIdsCache.set(issueId, { seenAtMs: Date.now(), labelIds: labelIds.slice() })
+  // Cheap periodic cleanup.
+  if (issueLabelIdsCache.size > 5000) {
+    const now = Date.now()
+    for (const [key, entry] of issueLabelIdsCache.entries()) {
+      if ((now - entry.seenAtMs) > ISSUE_LABEL_CACHE_TTL_MS) {
+        issueLabelIdsCache.delete(key)
+      }
+    }
+  }
+}
+
+/**
  * Generate a deduplication key for a webhook event
  */
 function getDeduplicationKey(type: string, action: string, dataId: string): string {
@@ -159,9 +192,24 @@ export function createWebhookHandler(config: AppConfig) {
       const issue = issueResult.data
       logger.info(`[webhook] Issue ${payload.action}: ${issue.identifier || issue.id} - ${issue.title}`)
 
-      const updatedFromLabelIds = payload.type === 'Issue'
-        ? payload.updatedFrom?.labelIds
+      const currentLabelIds = (issue.labelIds ?? issue.labels?.map((label) => label.id) ?? []).filter(Boolean)
+      const cachedPreviousLabelIds = payload.action === 'update' ? getCachedIssueLabelIds(issue.id) : undefined
+
+      // For update events, prefer Linear's explicit `updatedFrom.labelIds`.
+      // If missing, fall back to our cache; if we have no cache entry, use [] so we can still
+      // treat currently-present labels as "newly added" once after a restart.
+      const updatedFromLabelIds = payload.action === 'update'
+        ? (payload.updatedFrom?.labelIds ?? cachedPreviousLabelIds ?? [])
         : undefined
+
+      if (payload.action === 'update' && !payload.updatedFrom?.labelIds && !cachedPreviousLabelIds) {
+        logger.warn(
+          { issueId: issue.id, issueRef: issue.identifier || issue.id },
+          '[webhook] updatedFrom.labelIds missing; using empty baseline for label triggers'
+        )
+      }
+
+      setCachedIssueLabelIds(issue.id, currentLabelIds)
 
       const triggerMatch = matchTriggers(config.linear.triggers, {
         eventType: 'Issue',
@@ -173,7 +221,7 @@ export function createWebhookHandler(config: AppConfig) {
           description: issue.description,
           labels: normalizeLabels(issue.labels),
           labelsDetailed: issue.labels,
-          labelIds: issue.labelIds ?? issue.labels?.map((label) => label.id),
+          labelIds: currentLabelIds,
           updatedFromLabelIds,
         },
       })

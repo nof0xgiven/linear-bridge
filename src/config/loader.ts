@@ -38,10 +38,15 @@ export function resolveConfigPaths(): string[] {
   }
 
   const cwdConfig = path.join(process.cwd(), 'config.yaml')
+  const cwdLocalConfigYaml = path.join(process.cwd(), 'config.local.yaml')
+  const cwdLocalConfigYml = path.join(process.cwd(), 'config.local.yml')
   const homeConfig = path.join(os.homedir(), '.linear-bridge', 'config.yaml')
   // Merge order matters: later configs override earlier ones.
   // Use home as fallback and allow local config to override it.
-  const candidates = [homeConfig, cwdConfig].filter((p) => fs.existsSync(p))
+  // Also support config.local.yaml for local dev (common pattern; avoids committing config.yaml).
+  const candidates = [homeConfig, cwdConfig, cwdLocalConfigYaml, cwdLocalConfigYml].filter((p) =>
+    fs.existsSync(p)
+  )
   if (candidates.length === 0) {
     throw new Error(
       'No config file found. Set LINEAR_BRIDGE_CONFIG or create ./config.yaml'
