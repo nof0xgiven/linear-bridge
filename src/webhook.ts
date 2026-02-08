@@ -41,6 +41,19 @@ const processedEvents = new Map<string, number>()
 const ISSUE_LABEL_CACHE_TTL_MS = 10 * 60_000 // 10 minutes
 const issueLabelIdsCache = new Map<string, { seenAtMs: number; labelIds: string[] }>()
 
+/**
+ * Tracks which label triggers have already been executed per issue.
+ *
+ * Prevents label-based workflows (discovery, plan, code, etc.) from re-triggering
+ * on subsequent issue updates (status change, comment, etc.) when the label is
+ * already present but was not newly added.
+ *
+ * Entries are cleared when the label is removed from the issue, allowing
+ * re-triggering via remove + re-add.
+ */
+const EXECUTED_LABEL_TRIGGER_TTL_MS = 24 * 60 * 60_000 // 24 hours
+const executedLabelTriggers = new Map<string, number>()
+
 function getCachedIssueLabelIds(issueId: string): string[] | undefined {
   const cached = issueLabelIdsCache.get(issueId)
   if (!cached) return undefined
@@ -59,6 +72,54 @@ function setCachedIssueLabelIds(issueId: string, labelIds: string[]): void {
     for (const [key, entry] of issueLabelIdsCache.entries()) {
       if ((now - entry.seenAtMs) > ISSUE_LABEL_CACHE_TTL_MS) {
         issueLabelIdsCache.delete(key)
+      }
+    }
+  }
+}
+
+/**
+ * Check if a label trigger was already executed for this issue.
+ */
+function isLabelTriggerAlreadyExecuted(issueId: string, labelValue: string): boolean {
+  const key = `${issueId}:label:${labelValue.trim().toLowerCase()}`
+  const executedAt = executedLabelTriggers.get(key)
+  if (executedAt === undefined) return false
+  if (Date.now() - executedAt > EXECUTED_LABEL_TRIGGER_TTL_MS) {
+    executedLabelTriggers.delete(key)
+    return false
+  }
+  return true
+}
+
+/**
+ * Mark a label trigger as executed for this issue.
+ */
+function markLabelTriggerExecuted(issueId: string, labelValue: string): void {
+  const key = `${issueId}:label:${labelValue.trim().toLowerCase()}`
+  executedLabelTriggers.set(key, Date.now())
+  // Periodic cleanup
+  if (executedLabelTriggers.size > 5000) {
+    const now = Date.now()
+    for (const [k, ts] of executedLabelTriggers.entries()) {
+      if (now - ts > EXECUTED_LABEL_TRIGGER_TTL_MS) {
+        executedLabelTriggers.delete(k)
+      }
+    }
+  }
+}
+
+/**
+ * Clear executed-trigger entries for labels that are no longer on the issue.
+ * This allows re-triggering when a label is removed and later re-added.
+ */
+function clearRemovedLabelTriggers(issueId: string, currentLabels: string[]): void {
+  const normalizedCurrent = new Set(currentLabels.map((l) => l.trim().toLowerCase()))
+  const prefix = `${issueId}:label:`
+  for (const key of executedLabelTriggers.keys()) {
+    if (key.startsWith(prefix)) {
+      const labelValue = key.slice(prefix.length)
+      if (!normalizedCurrent.has(labelValue)) {
+        executedLabelTriggers.delete(key)
       }
     }
   }
@@ -212,6 +273,10 @@ export function createWebhookHandler(config: AppConfig) {
 
       setCachedIssueLabelIds(issue.id, currentLabelIds)
 
+      // Clear executed-trigger entries for labels that were removed,
+      // so re-adding a label later will correctly re-trigger the workflow.
+      clearRemovedLabelTriggers(issue.id, normalizeLabels(issue.labels))
+
       const triggerMatch = matchTriggers(config.linear.triggers, {
         eventType: 'Issue',
         action: payload.action,
@@ -230,6 +295,20 @@ export function createWebhookHandler(config: AppConfig) {
       if (!triggerMatch) {
         logger.info('[webhook] No matching trigger for issue')
         return c.json({ status: 'ignored', reason: 'No trigger match' })
+      }
+
+      // Guard: prevent label triggers from re-firing on subsequent issue updates.
+      // A label trigger should only execute once per label addition. Without this guard,
+      // cache expiry or missing `updatedFrom.labelIds` can cause false re-triggers.
+      if (triggerMatch.trigger.type === 'label') {
+        if (isLabelTriggerAlreadyExecuted(issue.id, triggerMatch.trigger.value)) {
+          logger.info(
+            { issueId: issue.id, label: triggerMatch.trigger.value },
+            '[webhook] Label trigger already executed for this issue, skipping'
+          )
+          return c.json({ status: 'ignored', reason: 'Label trigger already executed' })
+        }
+        markLabelTriggerExecuted(issue.id, triggerMatch.trigger.value)
       }
 
       triggerMatchesTotal.inc({ triggerType: triggerMatch.trigger.type, action: triggerMatch.action })
