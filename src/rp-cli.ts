@@ -3,17 +3,11 @@ import type { AppConfig } from './config/schema'
 import { logger } from './logger'
 import path from 'path'
 
-interface RepoPromptWindow {
-  windowID: number
-  workspaceID: string
-  workspaceName: string
-  rootFolderPaths: string[]
-}
-
 interface RepoPromptWorkspace {
   id: string
   name: string
   repo_paths: string[]
+  showing_window_ids: number[]
 }
 
 interface RepoPromptWorkspaceListResponse {
@@ -25,7 +19,13 @@ interface RepoPromptWorkspaceListResponse {
 interface RepoPromptManageWorkspacesResponse {
   status: 'ok' | 'error'
   action?: string
+  window_id?: number
   error?: string
+}
+
+interface WorkspaceResolution {
+  workspace: RepoPromptWorkspace
+  windowId: number
 }
 
 function normalizePath(value: string): string {
@@ -74,32 +74,6 @@ async function runProcess(
   return { exitCode, stdout, stderr }
 }
 
-async function listRepoPromptWindows(timeoutMs: number): Promise<RepoPromptWindow[]> {
-  const { exitCode, stdout, stderr } = await runProcess(
-    ['rp-cli', '--raw-json', '-e', 'windows'],
-    { timeoutMs }
-  )
-
-  if (exitCode !== 0) {
-    throw new Error(`Failed to list RepoPrompt windows: ${stderr || `Exit code ${exitCode}`}`)
-  }
-
-  const trimmed = stdout.trim()
-  if (!trimmed) return []
-
-  const parsed = JSON.parse(trimmed) as any
-  if (!Array.isArray(parsed)) {
-    throw new Error('Unexpected windows response from rp-cli (expected JSON array)')
-  }
-
-  return parsed.map((w) => ({
-    windowID: Number(w.windowID),
-    workspaceID: String(w.workspaceID ?? ''),
-    workspaceName: String(w.workspaceName ?? ''),
-    rootFolderPaths: Array.isArray(w.rootFolderPaths) ? w.rootFolderPaths.map(String) : [],
-  }))
-}
-
 async function listRepoPromptWorkspaces(timeoutMs: number): Promise<RepoPromptWorkspace[]> {
   const { exitCode, stdout, stderr } = await runProcess(
     ['rp-cli', '--raw-json', '-c', 'manage_workspaces', '-j', JSON.stringify({ action: 'list' })],
@@ -122,10 +96,11 @@ async function listRepoPromptWorkspaces(timeoutMs: number): Promise<RepoPromptWo
     id: String(ws.id),
     name: String(ws.name),
     repo_paths: Array.isArray(ws.repo_paths) ? ws.repo_paths.map(String) : [],
+    showing_window_ids: Array.isArray(ws.showing_window_ids) ? ws.showing_window_ids.map(Number) : [],
   }))
 }
 
-async function createRepoPromptWorkspace(timeoutMs: number, repoPath: string): Promise<void> {
+async function createRepoPromptWorkspace(timeoutMs: number, repoPath: string): Promise<number | undefined> {
   const baseName = path.basename(repoPath) || 'workspace'
   const name = `linear-bridge:${baseName}`
 
@@ -136,7 +111,7 @@ async function createRepoPromptWorkspace(timeoutMs: number, repoPath: string): P
       '-c',
       'manage_workspaces',
       '-j',
-      JSON.stringify({ action: 'create', name, folder_path: repoPath }),
+      JSON.stringify({ action: 'create', name, folder_path: repoPath, open_in_new_window: true }),
     ],
     { timeoutMs }
   )
@@ -146,85 +121,94 @@ async function createRepoPromptWorkspace(timeoutMs: number, repoPath: string): P
   }
 
   const trimmed = stdout.trim()
-  if (!trimmed) return
+  if (!trimmed) return undefined
 
   try {
     const parsed = JSON.parse(trimmed) as RepoPromptManageWorkspacesResponse
     if (parsed.status !== 'ok') {
       throw new Error(parsed.error || 'RepoPrompt workspace create failed')
     }
+    return parsed.window_id
   } catch {
     // Non-JSON output - treat as success.
+    return undefined
   }
 }
 
-async function resolveRepoPromptWorkspaceForRepoPath(timeoutMs: number, repoPath: string): Promise<RepoPromptWorkspace> {
-  const wanted = normalizePath(repoPath)
-
-  const workspaces = await listRepoPromptWorkspaces(timeoutMs)
-  const match = workspaces.find((ws) => ws.repo_paths.some((p) => normalizePath(p) === wanted))
-  if (match) return match
-
-  await createRepoPromptWorkspace(timeoutMs, repoPath)
-  const workspacesAfter = await listRepoPromptWorkspaces(timeoutMs)
-  const created = workspacesAfter.find((ws) => ws.repo_paths.some((p) => normalizePath(p) === wanted))
-  if (!created) {
-    throw new Error(`RepoPrompt workspace not found for repo path after create: ${repoPath}`)
-  }
-  return created
-}
-
-async function switchWindowWorkspace(timeoutMs: number, windowId: number, workspaceId: string): Promise<void> {
+async function openWorkspaceInNewWindow(timeoutMs: number, workspaceId: string): Promise<number | undefined> {
   const { exitCode, stdout, stderr } = await runProcess(
     [
       'rp-cli',
       '--raw-json',
-      '-w',
-      String(windowId),
       '-c',
       'manage_workspaces',
       '-j',
-      JSON.stringify({ action: 'switch', workspace: workspaceId }),
+      JSON.stringify({ action: 'switch', workspace: workspaceId, open_in_new_window: true }),
     ],
     { timeoutMs }
   )
 
   if (exitCode !== 0) {
-    throw new Error(`Failed to switch RepoPrompt workspace: ${stderr || `Exit code ${exitCode}`}`)
+    throw new Error(`Failed to open workspace in new window: ${stderr || `Exit code ${exitCode}`}`)
   }
 
   const trimmed = stdout.trim()
-  if (!trimmed) return
+  if (!trimmed) return undefined
 
   try {
     const parsed = JSON.parse(trimmed) as RepoPromptManageWorkspacesResponse
     if (parsed.status !== 'ok') {
       throw new Error(parsed.error || 'RepoPrompt workspace switch failed')
     }
+    return parsed.window_id
   } catch {
-    // Non-JSON output - treat as success.
+    return undefined
   }
 }
 
-function injectRpCliWindowFlag(commandTemplate: string, windowId: number): string | null {
-  const trimmed = commandTemplate.trim()
-  if (!trimmed.startsWith('rp-cli')) {
-    return null
+async function resolveRepoPromptWorkspaceForRepoPath(timeoutMs: number, repoPath: string): Promise<WorkspaceResolution> {
+  const wanted = normalizePath(repoPath)
+
+  const workspaces = await listRepoPromptWorkspaces(timeoutMs)
+  const match = workspaces.find((ws) => ws.repo_paths.some((p) => normalizePath(p) === wanted))
+
+  if (match) {
+    // Workspace exists — reuse its window if already showing, otherwise open a new one
+    if (match.showing_window_ids.length > 0) {
+      return { workspace: match, windowId: match.showing_window_ids[0] }
+    }
+    const windowId = await openWorkspaceInNewWindow(timeoutMs, match.id)
+    if (windowId == null) {
+      throw new Error(`Failed to get window_id when opening existing workspace: ${match.name}`)
+    }
+    return { workspace: match, windowId }
   }
 
-  // Strip any existing window targeting (we will control it).
-  let command = commandTemplate
-    .replace(/\s+-w\s+\S+/g, '')
-    .replace(/\s+--window=\S+/g, '')
-    .replace(/\s+--window\s+\S+/g, '')
-
-  // Ensure a window is always specified (required when multiple windows exist).
-  command = command.replace(/\brp-cli\b/, `rp-cli -w ${windowId}`)
-  return command
+  // Workspace doesn't exist — create it in a new window
+  const windowId = await createRepoPromptWorkspace(timeoutMs, repoPath)
+  const workspacesAfter = await listRepoPromptWorkspaces(timeoutMs)
+  const created = workspacesAfter.find((ws) => ws.repo_paths.some((p) => normalizePath(p) === wanted))
+  if (!created) {
+    throw new Error(`RepoPrompt workspace not found for repo path after create: ${repoPath}`)
+  }
+  if (windowId == null) {
+    throw new Error(`Failed to get window_id when creating workspace for: ${repoPath}`)
+  }
+  return { workspace: created, windowId }
 }
 
 /**
- * Execute rp-cli context_builder with the given task description
+ * Inject `-w <windowId>` into an rp-cli command string so it targets a specific window.
+ * Replaces the first occurrence of `rp-cli` with `rp-cli -w <windowId>`.
+ */
+function injectWindowId(command: string, windowId: number): string {
+  return command.replace(/\brp-cli\b/, `rp-cli -w ${windowId}`)
+}
+
+/**
+ * Execute rp-cli context_builder with the given task description.
+ * Each workspace is opened in its own RepoPrompt window to avoid conflicts
+ * when multiple worktrees are active concurrently.
  */
 export async function runContextBuilder(
   taskDescription: string,
@@ -248,52 +232,29 @@ export async function runContextBuilder(
     .replace(/\$/g, '\\$')
     .replace(/'/g, "'\\''")
 
-  let targetWorkspace: RepoPromptWorkspace
-  let targetWindow: RepoPromptWindow
-  let previousWorkspaceId: string
+  let resolution: WorkspaceResolution
 
   try {
-    targetWorkspace = await resolveRepoPromptWorkspaceForRepoPath(controlTimeoutMs, workspacePath)
-    const windows = await listRepoPromptWindows(controlTimeoutMs)
-    if (windows.length === 0) {
-      throw new Error('No RepoPrompt windows available (is the RepoPrompt app running?)')
-    }
-
-    // Prefer a window already showing the desired workspace to reduce disruption.
-    targetWindow = windows.find((w) => w.workspaceID === targetWorkspace.id)
-      ?? windows.sort((a, b) => a.windowID - b.windowID)[0]
-    previousWorkspaceId = targetWindow.workspaceID
+    resolution = await resolveRepoPromptWorkspaceForRepoPath(controlTimeoutMs, workspacePath)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    logger.error(`[rp-cli] Failed to resolve RepoPrompt target: ${message}`)
+    logger.error(`[rp-cli] Failed to resolve RepoPrompt workspace: ${message}`)
     return { success: false, output: '', error: message }
   }
 
-  const injectedCommandTemplate = injectRpCliWindowFlag(config.command, targetWindow.windowID)
-  if (!injectedCommandTemplate) {
-    const message = 'Unsupported context.command format. Expected command to start with rp-cli.'
-    logger.error(`[rp-cli] ${message}`)
-    return { success: false, output: '', error: message }
-  }
-
-  const command = injectedCommandTemplate.split('{TASK}').join(escapedTask)
+  // Inject -w <windowId> into the rp-cli command to target the correct window
+  const command = injectWindowId(config.command.split('{TASK}').join(escapedTask), resolution.windowId)
 
   logger.info(
     {
       repoPath: workspacePath,
-      rpWindowId: targetWindow.windowID,
-      previousWorkspace: { id: previousWorkspaceId, name: targetWindow.workspaceName },
-      targetWorkspace: { id: targetWorkspace.id, name: targetWorkspace.name },
+      targetWorkspace: { id: resolution.workspace.id, name: resolution.workspace.name },
+      windowId: resolution.windowId,
     },
     '[rp-cli] Running context builder via RepoPrompt'
   )
 
   try {
-    // Ensure the window points at the right RepoPrompt workspace for this repo.
-    if (previousWorkspaceId !== targetWorkspace.id) {
-      await switchWindowWorkspace(controlTimeoutMs, targetWindow.windowID, targetWorkspace.id)
-    }
-
     const { exitCode, stdout, stderr } = await runProcess(['bash', '-c', command], {
       cwd: workspacePath,
       timeoutMs: config.timeoutMs,
@@ -314,15 +275,6 @@ export async function runContextBuilder(
     const errorMessage = error instanceof Error ? error.message : String(error)
     logger.error(`[rp-cli] Error: ${errorMessage}`)
     return { success: false, output: '', error: errorMessage }
-  } finally {
-    // Best-effort restore to avoid leaving the user's window on a different workspace.
-    if (previousWorkspaceId && previousWorkspaceId !== targetWorkspace.id) {
-      try {
-        await switchWindowWorkspace(controlTimeoutMs, targetWindow.windowID, previousWorkspaceId)
-      } catch (error) {
-        logger.warn({ error }, '[rp-cli] Failed to restore previous RepoPrompt workspace')
-      }
-    }
   }
 }
 

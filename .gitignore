@@ -23,3 +23,7 @@ bun.lockb
 
 # OS
 .DS_Store
+
+# Agent
+.pi/
+.superset/
